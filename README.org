@@ -1,0 +1,6 @@
+#+TITLE: README
+#+AUTHOR: kqr
+#+DATE: <2018-04-06 Fri>
+
+I am about to do some experiments into Monte Carlo methods, so why not answer
+questions I've long had?
