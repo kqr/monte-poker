@@ -13,18 +13,13 @@
 (defparameter *ranks*
   '(2 3 4 5 6 7 8 9 10 jack queen king ace))
 
-(defclass card ()
-  ((suit
-    :reader card-suit
-    :initarg :suit)
-   (rank
-    :reader card-rank
-    :initarg :rank)))
+(defun card-suit (card)
+  "Return the suit from a CARD pair (suit . rank)."
+  (car card))
 
-(defmethod print-object ((card card) stream)
-  (print-unreadable-object (card stream :type t)
-    (with-slots (suit rank) card
-      (format stream "~s ~s" suit rank))))
+(defun card-rank (card)
+  "Return the rank from a CARD pair (suit . rank)."
+  (cdr card))
 
 (defun rank< (left right)
   (< (position left *ranks*)
@@ -32,17 +27,16 @@
 
 ;; * Deck
 (defparameter *cards*
-  (map-product
-   (lambda (suit rank)
-     (make-instance 'card :suit suit :rank rank))
-   *suits* *ranks*))
+  (map-product #'cons *suits* *ranks*)
+  "A list of all cards, each card being a cons pair.")
 
 (defclass deck ()
   ((cards
     :initform (shuffle *cards*))))
 
-(defun draw-cards (deck &optional (n 1))
-  (loop repeat n collect
+(defun draw-cards (deck &optional (count 1))
+  "Draw cards from DECK, optionally with COUNT specified."
+  (loop repeat count collect
        (pop (slot-value deck 'cards))))
 
 ;; * Player
@@ -61,10 +55,11 @@
             (player-hand player))))
 
 (defun drop-cards (player &key (keep nil))
+  "Drop all cards from PLAYER except those in KEEP."
   (setf (slot-value player 'hand) keep))
 
 (defmethod reject-card ((player player) card)
-  "Reject no card."
+  "Default action for PLAYER is to reject no CARD."
   nil)
 
 ;; ** Newbie
@@ -81,12 +76,16 @@
 
 ;; * Utils
 (defun counts (seq &key (key #'identity))
+  "Each item in SEQ (under KEY) associated with its
+count, returned as a hash table."
   (loop with counts = (make-hash-table)
      for elt in seq
      do (incf (gethash (funcall key elt) counts 0))
      finally (return counts)))
 
-(defun invert (hash-table)
+(defun hash-table-invert (hash-table)
+  "Invert HASH-TABLE, going from a key--value mapping to
+a mapping of key--list-of-values."
   (loop with inverted = (make-hash-table)
      for key being the hash-keys of hash-table
      using (hash-value value)
@@ -95,7 +94,8 @@
 
 ;; * Scoring
 (defun hand-counts (hand key)
-  (invert (counts hand :key key)))
+  "Return how many there are in HAND of each KEY."
+  (hash-table-invert (counts hand :key key)))
 
 (defparameter *hands*
   '(high-card
@@ -109,6 +109,7 @@
     straight-flush))
 
 (defun score (hand)
+  "Return the best way to view HAND as a standard poker hand."
   (let* ((rank-counts (hand-counts hand #'card-rank))
          (suit-counts (hand-counts hand #'card-suit))
          (ranks (sort (mapcar #'card-rank hand) #'rank<))
@@ -119,31 +120,30 @@
          (flush (gethash 5 suit-counts))
          (quadruple (gethash 4 rank-counts))
          (triple (gethash 3 rank-counts))
-         (pair (gethash 2 rank-counts)))
+         (pair (sort (gethash 2 rank-counts) #'rank<))
+         (high-card (car (last ranks))))
     (cond
-      ((and straight flush) (list 'straight-flush (car (last ranks)))) 
+      ((and straight flush) (list 'straight-flush high-card)) 
       (quadruple (list 'four-of-a-kind (car quadruple))) 
       ((and triple pair) (list 'full-house (car triple) (car pair))) 
-      (flush (list 'flush (car (last ranks)))) 
-      (straight (list 'straight (car (last straight)))) 
+      (flush (list 'flush high-card)) 
+      (straight (list 'straight high-card)) 
       (triple (list 'three-of-a-kind (car triple))) 
-      ((= 2 (length pair))
-       (let ((sorted (sort pair #'rank<)))
-         (list 'two-pairs (cadr sorted) (car sorted)))) 
+      ((= 2 (length pair)) (list 'two-pairs (cadr pair) (car pair))) 
       (pair (list 'one-pair (car pair)))
-      (t (list 'high-card (car (last ranks)))))))
+      (t (list 'high-card high-card)))))
 
-(defun rank-list< (left right)
-  (and left
-       right
-       (if (= (position (car left) *ranks*)
-              (position (car right) *ranks*))
-           (rank-list< (cdr left)
-                       (cdr right))
-           (< (position (car left) *ranks*)
-              (position (car right) *ranks*)))))
+(defun list< (left right &key (key #'identity))
+  "Compare two lists LEFT and RIGHT lexicographically under KEY."
+  (and left right
+       (let ((left-val (key (car left)))
+             (right-val (key (car right))))
+         (if (= left-val right-val)
+             (list< (cdr left) (cdr right) :key key)
+             (< left-val right-val)))))
 
 (defun hand< (left right)
+  "Compare two hands LEFT and RIGHT with poker ranking rules."
   (let* ((left-score (score left))
          (right-score (score right)) 
          (left-hand (position (car left-score) *hands*))
@@ -154,13 +154,13 @@
 
 ;; * Game
 (defun deal-cards (player deck)
-  "Draws cards from the deck until hand is full."
+  "Deal cards until PLAYER hand is full, drawing from DECK."
   (let ((count (- 5 (length (player-hand player)))))
     (appendf (slot-value player 'hand)
              (draw-cards deck count))))
 
 (defun replace-cards (player deck)
-  "Replace cards rejected by player."
+  "Replace cards rejected by PLAYER with new cards from DECK."
   (drop-cards player :keep (remove-if
                             (curry #'reject-card player)
                             (player-hand player)))
