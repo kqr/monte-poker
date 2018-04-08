@@ -1,59 +1,61 @@
-(ql:quickload :alexandria)
-(ql:quickload :fset)
+;; * Commentary
+;; - TODO: Property testing with check-it
+;;         (https://github.com/DalekBaldwin/check-it)
 
+
+;; * Code
 (defpackage :org.xkqr.dev.cl.poker
-  (:use :common-lisp :alexandria :fset-user))
+  (:shadowing-import-from :fset
+                          #:set #:empty-set
+                          #:bag #:do-bag-pairs
+                          #:map #:empty-map
+                          #:appendf #:includef
+                          #:lookup #:first #:last #:empty?
+                          #:compare #:compare-slots #:equal?
+                          #:less-than? #:greater-than?
+                          #:sort #:greatest #:least)
+  (:shadowing-import-from :alexandria #:curry #:map-product)
+  (:use :cl))
+
 (in-package :org.xkqr.dev.cl.poker)
 
-;; * Define custom, generic orderings
-(defgeneric ord< (a b)
-  (:documentation "Generically check if a is less than b."))
+;; * Macro to define orders of symbols
+(defmacro deforder (name symbols) 
+  (let ((order-symbol
+         (intern (concatenate 'string
+                              "*" (symbol-name name) "S*"))))
+    `(progn
+       (defclass ,name ()
+         ((name
+           :reader name
+           :initarg :value)))
 
-(defmethod ord< ((a null) (b null))
-  nil)
+       (defmethod print-object ((value ,name) stream)
+         (print-unreadable-object (value stream :type t)
+           (with-slots (name) value
+             (format stream "~s" name))))
+       
+       (defun ,name (value)
+         (make-instance (quote ,name) :value value))
 
-(defmethod ord< ((a cons) (b cons))
-  "Cons pairs are compared lexicographically."
-  (or (ord< (car a) (car b))
-      (and (not (ord< (car b) (car a)))
-           (ord< (cdr a) (cdr b)))))
+       (defparameter ,order-symbol
+         (mapcar #',name ,symbols))     
 
-(defmacro deforder (name symbols)
-  "An order has a NAME and is a set of SYMBOLS associated with a particular
-order. This macro generates convenience functions to deal with it when sorting,
-etc."
-  `(progn
-     (defclass ,name ()
-       ((name
-         :reader name
-         :initarg :value)))
-
-     (defmethod print-object ((value ,name) stream)
-       (print-unreadable-object (value stream :type t)
-         (with-slots (name) value
-           (format stream "~s" name))))
-     
-     (defun ,name (value)
-       (make-instance (quote ,name) :value value))
-
-     (defparameter ,(intern (concatenate 'string "*" (symbol-name name) "S*"))
-       (mapcar #',name ,(car body)))     
-     
-     (defmethod ord< ((a ,name) (b ,name))
-       (< (position (name a) ,(order-symbol name) :key #'name)
-          (position (name b) ,(order-symbol name) :key #'name)))))
+       (defmethod compare ((a ,name) (b ,name))
+         (compare-slots
+          a b (lambda (o)
+                (position (name o) ,order-symbol
+                          :key #'name)))))))
 
 ;; * Deck of cards
-;; TODO test ordering of orders
-
 (deforder rank
-  '(2 3 4 5 6 7 8 9 10 jack queen king ace))
+    '(2 3 4 5 6 7 8 9 10 jack queen king ace))
 
 (deforder suit
-  '(clubs diamonds hearts spades))
+    '(clubs diamonds hearts spades))
 
 (deforder card
-  (map-product #'cons *ranks* *suits*))
+    (map-product #'cons *ranks* *suits*))
 
 (defun card-rank (card)
   "Return the rank from a CARD."
@@ -65,7 +67,7 @@ etc."
 
 (defclass deck ()
   ((cards
-    :initform (shuffle *cards*))))
+    :initform (alexandria:shuffle *cards*))))
 
 (defun draw-cards (deck &optional (count 1))
   "Draw cards from DECK, optionally with COUNT specified."
@@ -100,25 +102,23 @@ etc."
 
 (defmethod reject-card ((player newbie) card)
   "Stupid AI rejects any cards with value less than 7."
-  (ord< (card-rank card) (rank 7)))
+  (less-than? (card-rank card) (rank 7)))
 
 ;; ** Human
 (defclass human (player)
   nil)
 
 ;; * Scoring
-(defun hand-counts (hand key)
-  "Return how many there are in HAND of each KEY."
-  (let ((counts (fset:convert 'fset:bag (mapcar key hand)))
-        (inverted (fset:empty-map '())))
-    (fset:do-bag-pairs (item mult counts)
-      (push item (fset:lookup inverted mult)))
-    inverted))
+(defun multiplicity-map (bag)
+  "Invert BAG into a map from multiplicity to set-of-items."
+  (let ((inverted (empty-map (empty-set))))
+    (do-bag-pairs (item mult bag inverted)
+      (fset:includef (lookup inverted mult) item))))
 
 (deforder hand-type
-  '(high-card one-pair two-pairs three-of-a-kind
-    straight flush full-house four-of-a-kind
-    straight-flush))
+    '(high-card one-pair two-pairs three-of-a-kind
+      straight flush full-house four-of-a-kind
+      straight-flush))
 
 (defparameter ace-low-straight
   (mapcar #'rank '(ace 2 3 4 5))
@@ -126,38 +126,60 @@ etc."
 
 (defun player-score (player)
   "Return the best way to view HAND as a standard poker hand."
-  (let* ((hand (player-hand player))
-         (rank-counts (hand-counts hand #'card-rank))
-         (suit-counts (hand-counts hand #'card-suit))
-         (ranks (sort (mapcar #'card-rank hand) #'ord<))
-         (straight (cond ((equal ranks ace-low-straight)
-                          ace-low-straight)
-                         ((search ranks *ranks*)
-                          ranks)))
-         (flush (fset:lookup suit-counts 5))
-         (quadruple (fset:lookup rank-counts 4))
-         (triple (fset:lookup rank-counts 3))
-         (pair (sort (fset:lookup rank-counts 2) #'ord<))
-         (high-card (car (last ranks))))
-    (cond
-      ((and straight flush)
-       (list (hand-type 'straight-flush) high-card)) 
-      (quadruple
-       (list (hand-type 'four-of-a-kind) (car quadruple))) 
-      ((and triple pair)
-       (list (hand-type 'full-house) (car triple) (car pair))) 
-      (flush
-       (list (hand-type 'flush) high-card)) 
-      (straight
-       (list (hand-type 'straight) high-card)) 
-      (triple
-       (list (hand-type 'three-of-a-kind) (car triple))) 
-      ((= 2 (length pair))
-       (list (hand-type 'two-pairs) (cadr pair) (car pair))) 
-      (pair
-       (list (hand-type 'one-pair) (car pair)))
-      (t
-       (list (hand-type 'high-card) high-card)))))
+  (let* ((hand (sort (player-hand player) #'less-than?)) 
+         (ranks (fset:convert 'bag (mapcar #'card-rank hand)))
+         (suits (fset:convert 'bag (mapcar #'card-suit hand)))
+         (rank-counts (multiplicity-map ranks)) 
+         (pairs (lookup rank-counts 2))
+         (triples (lookup rank-counts 3))
+         (quadruples (lookup rank-counts 4))
+         
+         (three-of-a-kind
+          (and (not (empty? triples))
+               (list (hand-type 'three-of-a-kind)
+                     (greatest triples))))
+         (four-of-a-kind
+          (and (not (empty? quadruples))
+               (list (hand-type 'four-of-a-kind)
+                     (greatest quadruples))))
+         (two-pairs
+          (and (= 2 (fset:set-size pairs))
+               (list (hand-type 'two-pairs)
+                     (greatest pairs)
+                     (least pairs)))) 
+         (flush
+          (and (= 1 (fset:set-size suits))
+               (list (hand-type 'flush)
+                     (greatest ranks))))
+         (straight
+          (and (or (equal? ranks ace-low-straight)
+                   (search (fset:convert 'list ranks) *ranks*))
+               (list (hand-type 'straight)
+                     (if (equal? ranks ace-low-straight)
+                         (rank 5)
+                         (greatest ranks))))) 
+         (full-house
+          (and (not (empty? triples)) (not (empty? pairs))
+               (list (hand-type 'full-house)
+                     (greatest triples)
+                     (greatest pairs)))) 
+         (straight-flush
+          (and straight flush
+               (list (hand-type 'straight-flush)
+                     (greatest ranks)))))
+
+    (greatest
+     (set
+      (list (hand-type 'high-card) (greatest ranks))
+      (and (not (empty? pairs))
+           (list (hand-type 'pair) (greatest pairs)))
+      two-pairs
+      three-of-a-kind
+      four-of-a-kind
+      straight
+      flush
+      full-house
+      straight-flush))))
 
 ;; * Game
 (defun deal-cards (player deck)
@@ -191,14 +213,30 @@ etc."
     
     (loop for player in players
        for best = player then
-         (if (ord< (player-score best)
-                   (player-score player))
-             player
-             best)
+         (if (less-than? (player-score best) (player-score player))
+             player best)
        finally
          (incf (slot-value best 'wins)))
 
     (mapc #'drop-cards players))  
-  
   players)
 
+(defun play-game (players rounds)
+  (loop repeat rounds do (game-round players))
+  players)
+
+(check-it:def-generator new-deck ()
+  (make-instance 'deck))
+
+(prove:subtest "Testing PLAYER vs NEWBIE"
+  (let ((*num-trials* 10))
+    (prove:plan 1)
+    (prove:ok (check-it:check-it
+               (check-it:generator (new-deck))
+               (lambda (deck)
+                 (let ((result
+                        (play-game (list (make-instance 'newbie)
+                                         (make-instance 'player))
+                                   100)))
+                   (< (car result) (- (cadr result) 10))))))
+    (prove:finalize)))
